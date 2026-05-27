@@ -240,5 +240,21 @@ async def mark_done(message: Message):
 
     await message.answer(f"Задача №{task_id} отмечена как выполнена ✅")
 
+from aiohttp import web
+import os
+
+async def handle(request):
+    return web.Response(text="Bot is running")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+
+    port = int(os.getenv("PORT", 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
 if __name__ == "__main__":
     asyncio.run(main())
