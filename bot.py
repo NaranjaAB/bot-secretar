@@ -168,9 +168,13 @@ async def btn_tasks(message: Message):
         text += f"{t[0]}. {t[1]} | {t[2]} | {t[3]}\n"
 
     await message.answer(text)
+    
 async def main():
     scheduler.start()
     scheduler.add_job(reminder, "cron", hour=9, minute=0)
+
+    await start_web_server()  
+
     await dp.start_polling(bot)
 
 @dp.message(lambda message: "Новая задача" in message.text)
