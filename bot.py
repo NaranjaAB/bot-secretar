@@ -115,8 +115,6 @@ async def reminder():
         SELECT id, task, deadline, employee_id, reminded
         FROM tasks
         WHERE status != 'Выполнено'
-        FROM tasks
-        WHERE status != 'Выполнено'
     """)
 
     tasks = cursor.fetchall()
@@ -154,7 +152,7 @@ async def reminder():
 
                 conn.commit()
 
-@dp.message(lambda message: message.text == "📋 Задачи")
+@dp.message(lambda message: message.text and message.text == "📋 Задачи")
 async def btn_tasks(message: Message):
     cursor.execute("SELECT id, task, deadline, status FROM tasks")
     tasks = cursor.fetchall()
@@ -173,11 +171,12 @@ async def main():
     scheduler.start()
     scheduler.add_job(reminder, "cron", hour=9, minute=0)
 
-    await start_web_server()  
+    await asyncio.gather(
+        start_web_server(),
+        dp.start_polling(bot)
+    )
 
-    await dp.start_polling(bot)
-
-@dp.message(lambda message: "Новая задача" in message.text)
+@dp.message(lambda message: message.text and "Новая задача" in message.text)
 async def btn_new(message: Message, state: FSMContext):
     await state.set_state(TaskForm.employee)
     await message.answer("Кому назначить задачу? (впиши ID)")
