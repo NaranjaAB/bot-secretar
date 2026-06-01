@@ -1,5 +1,5 @@
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, Document, CallbackQuery
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart, Command, StateFilter
 import asyncio
 import sqlite3
@@ -67,6 +67,7 @@ worker_menu = ReplyKeyboardMarkup(
 admin_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="👥 Сотрудники")],
+        [KeyboardButton(text="📊 Отчет")],
         [KeyboardButton(text="📌 Мои задачи"), KeyboardButton(text="🗂 Мой архив")],
         [KeyboardButton(text="✔ Выполнено")]
     ],
@@ -82,6 +83,8 @@ admin_employees_menu = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+
+admin_last_report = {}
 
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
@@ -123,7 +126,6 @@ def save_employee(user_id: int, name: str) -> bool:
     return True
 
 def get_employee_name(user_id: int) -> str:
-    
     cursor.execute(
         """
         SELECT display_name, name
@@ -145,6 +147,7 @@ def get_employee_name(user_id: int) -> str:
             return telegram_name
 
     return "Неизвестный сотрудник"
+
 
 conn = sqlite3.connect("tasks.db")
 cursor = conn.cursor()
@@ -262,166 +265,12 @@ async def start(message: Message):
             reply_markup=worker_menu
         )
 
-@dp.message(Command("task"))
-async def create_task(message: Message):
-    if not is_boss(message.from_user.id):
-        await message.answer("Создавать задачи может только шеф")
-        return
-
-    raw = message.text.replace("/task", "").strip()
-
-    parts = raw.split(".")
-
-    if len(parts) < 3:
-        await message.answer("Формат: /task ID. задача. ДД/ММ/ГГГГ")
-        return
-
-    employee_id_text = parts[0].strip()
-
-    if not employee_id_text.isdigit():
-        await message.answer("ID сотрудника должен быть числом")
-        return
-
-    employee_id = int(employee_id_text)
-    task_text = parts[1].strip()
-    date_text = parts[2].strip()
-
-    # 💡 парсим ДД/ММ/ГГГГ
-    try:
-        day, month, year = date_text.split("/")
-
-        deadline = f"{day.zfill(2)}/{month.zfill(2)}/{year}"
-    except:
-        deadline = "Без дедлайна"
-
-    cursor.execute(
-        "INSERT INTO tasks (employee_id, task, deadline, status) VALUES (?, ?, ?, ?)",
-        (employee_id, task_text, deadline, "В процессе")
-    )
-
-    conn.commit()
-
-    try:
-        await bot.send_message(
-            employee_id,
-            (
-                f"<b>📌 Новая задача</b>\n\n"
-                f"📝 {task_text}\n"
-                f"📅 Дедлайн: <b>{deadline}</b>"
-            ),
-            parse_mode="HTML"
-        )
-
-        await message.answer(
-            f"Задача создана 😄\n\n{task_text}\nДедлайн: {deadline}"
-        )
-
-    except Exception:
-        await message.answer(
-            f"Задача создана, но я не смог отправить уведомление сотруднику.\n\n"
-            f"Попроси сотрудника открыть бота и нажать /start."
-        )
-
-        await notify_admin_delivery_failed(
-            employee_id,
-            "Новая задача",
-            task_text
-        )
-            )
-@dp.message(Command("tasks"))
-async def show_tasks(message: Message):
-    if not is_boss(message.from_user.id):
-        await message.answer("Эта команда доступна только шефу")
-        return
-
-    cursor.execute("""
-        SELECT id, employee_id, task, deadline, status
-        FROM tasks
-        ORDER BY id DESC
-    """)
-    tasks = cursor.fetchall()
-
-    if not tasks:
-        await message.answer("Пока задач нет")
-        return
-
-    text = "<b>📋 Активные задачи:</b>\n\n"
-
-    for task_id, employee_id, task_text, deadline, status in tasks:
-        employee_name = get_employee_name(employee_id)
-
-        text += (
-            f"<b>#{task_id}</b>\n"
-            f"👤 Сотрудник: {employee_name}\n"
-            f"📝 {task_text}\n"
-            f"📅 Дедлайн: {deadline}\n"
-            f"📌 Статус: <b>{status}</b>\n\n"
-        )
-
-    await message.answer(text, parse_mode="HTML")
-
-
 @dp.message(Command("myid"))
 async def myid(message: Message):
     await message.answer(str(message.from_user.id))
 
-@dp.message(Command("fire"))
-async def fire_employee(message: Message):
-    if not is_boss(message.from_user.id):
-        await message.answer("Эта команда доступна только шефу")
-        return
 
-    parts = message.text.split(maxsplit=1)
 
-    if len(parts) < 2 or not parts[1].isdigit():
-        await message.answer("Формат: /fire Telegram_ID")
-        return
-
-    employee_id = int(parts[1])
-
-    if employee_id == BOSS_ID:
-        await message.answer("Шефа нельзя уволить 😄")
-        return
-
-    cursor.execute(
-        "UPDATE employees SET is_active = 0 WHERE telegram_id = ?",
-        (employee_id,)
-    )
-
-    conn.commit()
-
-    if cursor.rowcount == 0:
-        await message.answer("Я не нашёл такого сотрудника в базе")
-        return
-
-    await message.answer(f"Сотрудник {employee_id} скрыт из списка активных")
-
-@dp.message(Command("restore"))
-async def restore_employee(message: Message):
-    if not is_boss(message.from_user.id):
-        await message.answer("Эта команда доступна только шефу")
-        return
-
-    parts = message.text.split(maxsplit=1)
-
-    if len(parts) < 2 or not parts[1].isdigit():
-        await message.answer("Формат: /restore Telegram_ID")
-        return
-
-    employee_id = int(parts[1])
-
-    cursor.execute(
-        "UPDATE employees SET is_active = 1 WHERE telegram_id = ?",
-        (employee_id,)
-    )
-
-    conn.commit()
-
-    if cursor.rowcount == 0:
-        await message.answer("Я не нашёл такого сотрудника в базе")
-        return
-
-    await message.answer(f"Сотрудник {employee_id} снова активен")
 
 @dp.message(Command("cancel"), StateFilter("*"))
 async def cancel(message: Message, state: FSMContext):
@@ -480,6 +329,135 @@ async def back_to_main_menu(message: Message):
             reply_markup=worker_menu
         )
 
+@dp.message(lambda message: message.text and message.text == "📊 Отчет")
+async def admin_report(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("Отчет доступен только админу")
+        return
+
+    now = datetime.now()
+    current_month = now.month
+    current_year = now.year
+
+    cursor.execute("""
+        SELECT employee_id, task, deadline, status, completed_at, cancelled_at
+        FROM tasks
+        ORDER BY id DESC
+    """)
+
+    tasks = cursor.fetchall()
+
+    completed_count = 0
+    cancelled_count = 0
+    active_tasks = []
+    overdue_tasks = []
+
+    today = now.date()
+
+    for employee_id, task_text, deadline, status, completed_at, cancelled_at in tasks:
+        employee_name = get_employee_name(employee_id)
+
+        if status == "Выполнено" and completed_at:
+            try:
+                completed_date = datetime.strptime(completed_at, "%d/%m/%Y %H:%M")
+
+                if completed_date.month == current_month and completed_date.year == current_year:
+                    completed_count += 1
+            except:
+                pass
+
+        elif status == "Отменено" and cancelled_at:
+            try:
+                cancelled_date = datetime.strptime(cancelled_at, "%d/%m/%Y %H:%M")
+
+                if cancelled_date.month == current_month and cancelled_date.year == current_year:
+                    cancelled_count += 1
+            except:
+                pass
+
+        elif status == "В процессе":
+            active_tasks.append((employee_name, task_text, deadline))
+
+            try:
+                deadline_date = datetime.strptime(deadline, "%d/%m/%Y").date()
+
+                if deadline_date < today:
+                    overdue_tasks.append((employee_name, task_text, deadline))
+            except:
+                pass
+
+    text = (
+        f"<b>📊 Отчет за текущий месяц</b>\n\n"
+        f"✅ Выполнено: <b>{completed_count}</b>\n"
+        f"❌ Отменено: <b>{cancelled_count}</b>\n"
+        f"📌 Активных задач сейчас: <b>{len(active_tasks)}</b>\n"
+        f"⚠️ Просроченных задач сейчас: <b>{len(overdue_tasks)}</b>\n\n"
+    )
+
+    if active_tasks:
+        text += "<b>📌 Невыполненные задачи:</b>\n\n"
+
+        for employee_name, task_text, deadline in active_tasks:
+            text += (
+                f"👤 {employee_name}\n"
+                f"📝 {task_text}\n"
+                f"📅 Дедлайн: {deadline}\n\n"
+            )
+    else:
+        text += "Невыполненных задач сейчас нет ✅"
+
+    admin_last_report[message.from_user.id] = text
+
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📤 Отправить шефу",
+                        callback_data="send_report_to_boss"
+                    )
+                ]
+            ]
+        )
+    )
+
+@dp.callback_query(lambda callback: callback.data == "send_report_to_boss")
+async def send_report_to_boss(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Отправлять отчет может только админ", show_alert=True)
+        return
+
+    report_text = admin_last_report.get(callback.from_user.id)
+
+    if not report_text:
+        await callback.message.answer(
+            "Сначала сформируй отчет через кнопку 📊 Отчет",
+            reply_markup=admin_menu
+        )
+        await callback.answer()
+        return
+
+    try:
+        await bot.send_message(
+            BOSS_ID,
+            report_text,
+            parse_mode="HTML"
+        )
+
+        await callback.message.answer(
+            "Отчет отправлен шефу ✅",
+            reply_markup=admin_menu
+        )
+
+    except Exception:
+        await callback.message.answer(
+            "Не смогла отправить отчет шефу. Проверь, что шеф открыл бота и нажал /start.",
+            reply_markup=admin_menu
+        )
+
+    await callback.answer()
 @dp.message(lambda message: message.text and message.text == "📋 Список сотрудников")
 async def admin_employee_list(message: Message):
     if not is_admin(message.from_user.id):
@@ -1635,16 +1613,12 @@ async def btn_cancel_task(message: Message):
         await message.answer("Отменять задачи может только шеф")
         return
 
-    cancelled_at = datetime.now().strftime("%d/%m/%Y %H:%M")
-
-    cursor.execute(
-        """
-        UPDATE tasks
-        SET status = ?, cancelled_at = ?
-        WHERE id = ?
-        """,
-        ("Отменено", cancelled_at, task_id)
-    )
+    cursor.execute("""
+        SELECT id, employee_id, task, deadline
+        FROM tasks
+        WHERE status = 'В процессе'
+        ORDER BY id DESC
+    """)
 
     tasks = cursor.fetchall()
 
@@ -1822,13 +1796,15 @@ async def cancel_task_reason(message: Message, state: FSMContext):
 
     employee_name = get_employee_name(employee_id)
 
+    cancelled_at = datetime.now().strftime("%d/%m/%Y %H:%M")
+
     cursor.execute(
         """
         UPDATE tasks
-        SET status = ?
+        SET status = ?, cancelled_at = ?
         WHERE id = ?
         """,
-        ("Отменено", task_id)
+        ("Отменено", cancelled_at, task_id)
     )
 
     conn.commit()
@@ -1866,7 +1842,7 @@ async def cancel_task_reason(message: Message, state: FSMContext):
             "Отмена задачи",
             task_text
         )
-     await state.clear()
+    await state.clear()
 
 @dp.message(lambda message: message.text and message.text == "📣 Напомнить")
 async def manual_reminder_start(message: Message):
@@ -2094,18 +2070,11 @@ async def confirm_manual_reminder(callback: CallbackQuery, state: FSMContext):
             reply_markup=boss_menu
         )
 
-        if ADMIN_ID:
-            try:
-                await bot.send_message(
-                    ADMIN_ID,
-                    (
-                        f"⚠️ Не удалось отправить ручное напоминание сотруднику\n\n"
-                        f"👤 Сотрудник: {employee_name}\n"
-                        f"📝 Задача: {task_text}"
-                    )
-                )
-            except Exception:
-                pass
+        await notify_admin_delivery_failed(
+            employee_id,
+            "Ручное напоминание",
+            task_text
+        )
 
     await state.clear()
     await callback.answer()
@@ -2362,6 +2331,12 @@ async def confirm_change_deadline(callback: CallbackQuery, state: FSMContext):
             "Дедлайн изменён, но я не смог отправить уведомление сотруднику."
         )
 
+        await notify_admin_delivery_failed(
+            employee_id,
+            "Изменение дедлайна",
+            task_text
+        )
+
     await state.clear()
     await callback.answer()
 
@@ -2403,10 +2378,10 @@ async def choose_reassign_task(callback: CallbackQuery, state: FSMContext):
     _, old_employee_id, task_text, deadline = task
 
     cursor.execute("""
-        SELECT telegram_id, name
+        SELECT telegram_id, display_name, name
         FROM employees
         WHERE is_active = 1 AND telegram_id != ?
-        ORDER BY name
+        ORDER BY display_name
     """, (old_employee_id,))
 
     employees = cursor.fetchall()
@@ -2418,10 +2393,12 @@ async def choose_reassign_task(callback: CallbackQuery, state: FSMContext):
 
     keyboard = []
 
-    for employee_id, name in employees:
+    for employee_id, display_name, telegram_name in employees:
+        employee_name = display_name or telegram_name or "Без имени"
+
         keyboard.append([
             InlineKeyboardButton(
-                text=name,
+                text=employee_name,
                 callback_data=f"reassign_to:{employee_id}"
             )
         ])
@@ -2434,10 +2411,12 @@ async def choose_reassign_task(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(ReassignTaskForm.employee)
 
+    old_employee_name = get_employee_name(old_employee_id)
+
     await callback.message.answer(
         (
             f"<b>🔁 Переназначение задачи</b>\n\n"
-            f"👤 Сейчас назначена: {old_employee_id}\n"
+            f"👤 Сейчас назначена: {old_employee_name}\n"
             f"📝 {task_text}\n"
             f"📅 Дедлайн: <b>{deadline}</b>\n\n"
             f"Выбери нового сотрудника:"
@@ -2463,7 +2442,11 @@ async def choose_reassign_employee(callback: CallbackQuery, state: FSMContext):
     new_employee_id = int(callback.data.split(":")[1])
 
     cursor.execute(
-        "SELECT name FROM employees WHERE telegram_id = ? AND is_active = 1",
+        """
+        SELECT display_name, name
+        FROM employees
+        WHERE telegram_id = ? AND is_active = 1
+        """,
         (new_employee_id,)
     )
 
@@ -2473,7 +2456,8 @@ async def choose_reassign_employee(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Сотрудник не найден или неактивен", show_alert=True)
         return
 
-    new_employee_name = employee[0]
+    display_name, telegram_name = employee
+    new_employee_name = display_name or telegram_name or "Без имени"
 
     data = await state.get_data()
 
@@ -2527,7 +2511,11 @@ async def choose_reassign_employee(callback: CallbackQuery, state: FSMContext):
             parse_mode="HTML"
         )
     except Exception:
-        pass
+        await notify_admin_delivery_failed(
+            old_employee_id,
+            "Задача снята с сотрудника при переназначении",
+            task_text
+        )
 
     try:
         await bot.send_message(
@@ -2542,6 +2530,12 @@ async def choose_reassign_employee(callback: CallbackQuery, state: FSMContext):
     except Exception:
         await callback.message.answer(
             "Задача переназначена, но я не смог отправить уведомление новому сотруднику."
+        )
+
+        await notify_admin_delivery_failed(
+            new_employee_id,
+            "Переназначение задачи",
+            task_text
         )
 
     await state.clear()
@@ -2564,10 +2558,10 @@ async def btn_new(message: Message, state: FSMContext):
         return
 
     cursor.execute("""
-        SELECT telegram_id, name
+        SELECT telegram_id, display_name, name
         FROM employees
         WHERE is_active = 1
-        ORDER BY name
+        ORDER BY display_name
     """)
 
     employees = cursor.fetchall()
@@ -2581,10 +2575,12 @@ async def btn_new(message: Message, state: FSMContext):
 
     keyboard = []
 
-    for telegram_id, name in employees:
+    for telegram_id, display_name, telegram_name in employees:
+        employee_name = display_name or telegram_name or "Без имени"
+
         keyboard.append([
             InlineKeyboardButton(
-                text=name,
+                text=employee_name,
                 callback_data=f"choose_employee:{telegram_id}"
             )
         ])
@@ -2607,7 +2603,11 @@ async def choose_employee(callback: CallbackQuery, state: FSMContext):
     employee_id = int(callback.data.split(":")[1])
 
     cursor.execute(
-        "SELECT name FROM employees WHERE telegram_id = ? AND is_active = 1",
+        """
+        SELECT display_name, name
+        FROM employees
+        WHERE telegram_id = ? AND is_active = 1
+        """,
         (employee_id,)
     )
 
@@ -2617,7 +2617,8 @@ async def choose_employee(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Сотрудник не найден или уже неактивен", show_alert=True)
         return
 
-    employee_name = employee[0]
+    display_name, telegram_name = employee
+    employee_name = display_name or telegram_name or "Без имени"
 
     await state.update_data(employee_id=employee_id, employee_name=employee_name)
     await state.set_state(TaskForm.task)
