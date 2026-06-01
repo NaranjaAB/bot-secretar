@@ -236,19 +236,22 @@ async def start(message: Message):
     user_id = message.from_user.id
     full_name = message.from_user.full_name
 
-    is_new_employee = save_employee(user_id, full_name)
+    is_new_employee = False
 
-    if is_new_employee and not is_admin(user_id):
-        try:
-            await bot.send_message(
-                ADMIN_ID,
-                (
-                    f"👤 Новый сотрудник зарегистрировался\n\n"
-                    f"Имя из Telegram: {full_name}"
+    if not is_boss(user_id):
+        is_new_employee = save_employee(user_id, full_name)
+
+        if is_new_employee and not is_admin(user_id):
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    (
+                        f"👤 Новый сотрудник зарегистрировался\n\n"
+                        f"Имя из Telegram: {full_name}"
+                    )
                 )
-            )
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     if is_admin(user_id):
         await message.answer(
@@ -829,8 +832,9 @@ async def admin_employee_list(message: Message):
     cursor.execute("""
         SELECT display_name, name, is_active
         FROM employees
-        ORDER BY is_active DESC, display_name
-    """)
+        WHERE telegram_id != ?
+        ORDER BY is_active DESC, COALESCE(display_name, name)
+    """, (BOSS_ID,))
 
     employees = cursor.fetchall()
 
@@ -870,8 +874,9 @@ async def admin_rename_employee_start(message: Message):
     cursor.execute("""
         SELECT telegram_id, display_name, name
         FROM employees
-        ORDER BY is_active DESC, COALESCE(display_name, name)
-    """)
+        WHERE telegram_id != ?
+        ORDER BY COALESCE(display_name, name)
+    """, (BOSS_ID,))
 
     employees = cursor.fetchall()
 
