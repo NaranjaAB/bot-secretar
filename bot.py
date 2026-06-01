@@ -870,7 +870,7 @@ async def admin_rename_employee_start(message: Message):
     cursor.execute("""
         SELECT telegram_id, display_name, name
         FROM employees
-        ORDER BY display_name
+        ORDER BY is_active DESC, COALESCE(display_name, name)
     """)
 
     employees = cursor.fetchall()
