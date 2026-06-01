@@ -832,9 +832,9 @@ async def admin_employee_list(message: Message):
     cursor.execute("""
         SELECT display_name, name, is_active
         FROM employees
-        WHERE telegram_id != ?
+        WHERE telegram_id != ? OR telegram_id = ?
         ORDER BY is_active DESC, COALESCE(display_name, name)
-    """, (BOSS_ID,))
+    """, (BOSS_ID, ADMIN_ID))
 
     employees = cursor.fetchall()
 
@@ -874,9 +874,9 @@ async def admin_rename_employee_start(message: Message):
     cursor.execute("""
         SELECT telegram_id, display_name, name
         FROM employees
-        WHERE telegram_id != ?
+        WHERE telegram_id != ? OR telegram_id = ?
         ORDER BY COALESCE(display_name, name)
-    """, (BOSS_ID,))
+    """, (BOSS_ID, ADMIN_ID))
 
     employees = cursor.fetchall()
 
