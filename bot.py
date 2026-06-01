@@ -1,11 +1,12 @@
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import CommandStart, Command, StateFilter
 import asyncio
 import sqlite3
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 import dateparser
+from openpyxl import Workbook
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -25,8 +26,6 @@ class TaskForm(StatesGroup):
 
 class DoneForm(StatesGroup):
     proof = State()
-class EmployeeTasksForm(StatesGroup):
-    employee_id = State()
 
 class CancelTaskForm(StatesGroup):
     reason = State()
@@ -68,6 +67,7 @@ admin_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="👥 Сотрудники")],
         [KeyboardButton(text="📊 Отчет")],
+        [KeyboardButton(text="🧹 Очистить архив")],
         [KeyboardButton(text="📌 Мои задачи"), KeyboardButton(text="🗂 Мой архив")],
         [KeyboardButton(text="✔ Выполнено")]
     ],
@@ -85,6 +85,7 @@ admin_employees_menu = ReplyKeyboardMarkup(
 )
 
 admin_last_report = {}
+admin_last_report_excel = {}
 
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
@@ -335,9 +336,131 @@ async def admin_report(message: Message):
         await message.answer("Отчет доступен только админу")
         return
 
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Текущий месяц",
+                    callback_data="report_period:month"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Текущий год",
+                    callback_data="report_period:year"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Все время",
+                    callback_data="report_period:all"
+                )
+            ]
+        ]
+    )
+
+    await message.answer(
+        "Выбери период отчета:",
+        reply_markup=keyboard
+    )
+
+@dp.message(lambda message: message.text and message.text == "🧹 Очистить архив")
+async def admin_clear_archive_start(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("Очищать архив может только админ")
+        return
+
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM tasks
+        WHERE status IN ('Выполнено', 'Отменено')
+    """)
+
+    archive_count = cursor.fetchone()[0]
+
+    if archive_count == 0:
+        await message.answer(
+            "Архив уже пуст",
+            reply_markup=admin_menu
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Да, очистить архив",
+                    callback_data="confirm_clear_archive"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Нет, отменить",
+                    callback_data="cancel_clear_archive"
+                )
+            ]
+        ]
+    )
+
+    await message.answer(
+        (
+            f"Ты уверена, что хочешь очистить архив?\n\n"
+            f"Будет удалено записей: <b>{archive_count}</b>\n\n"
+            f"Активные задачи останутся."
+        ),
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query(lambda callback: callback.data == "confirm_clear_archive")
+async def admin_confirm_clear_archive(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Очищать архив может только админ", show_alert=True)
+        return
+
+    cursor.execute("""
+        DELETE FROM tasks
+        WHERE status IN ('Выполнено', 'Отменено')
+    """)
+
+    deleted_count = cursor.rowcount
+    conn.commit()
+
+    await callback.message.answer(
+        f"Архив очищен ✅\n\nУдалено записей: {deleted_count}",
+        reply_markup=admin_menu
+    )
+
+    await callback.answer()
+
+@dp.callback_query(lambda callback: callback.data == "cancel_clear_archive")
+async def admin_cancel_clear_archive(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Очищать архив может только админ", show_alert=True)
+        return
+
+    await callback.message.answer(
+        "Очистка архива отменена",
+        reply_markup=admin_menu
+    )
+
+    await callback.answer()
+
+def build_admin_report(period: str, employee_filter: str = "all") -> str:
     now = datetime.now()
-    current_month = now.month
-    current_year = now.year
+    today = now.date()
+
+    if period == "month":
+        period_title = "текущий месяц"
+    elif period == "year":
+        period_title = "текущий год"
+    else:
+        period_title = "все время"
+
+    if employee_filter == "all":
+        employee_title = "все сотрудники"
+    else:
+        employee_title = get_employee_name(int(employee_filter))
 
     cursor.execute("""
         SELECT employee_id, task, deadline, status, completed_at, cancelled_at
@@ -352,28 +475,37 @@ async def admin_report(message: Message):
     active_tasks = []
     overdue_tasks = []
 
-    today = now.date()
+    def in_period(date_text):
+        if period == "all":
+            return True
+
+        if not date_text:
+            return False
+
+        try:
+            dt = datetime.strptime(date_text, "%d/%m/%Y %H:%M")
+        except:
+            return False
+
+        if period == "month":
+            return dt.month == now.month and dt.year == now.year
+
+        if period == "year":
+            return dt.year == now.year
+
+        return False
 
     for employee_id, task_text, deadline, status, completed_at, cancelled_at in tasks:
+        if employee_filter != "all" and employee_id != int(employee_filter):
+            continue
+
         employee_name = get_employee_name(employee_id)
 
-        if status == "Выполнено" and completed_at:
-            try:
-                completed_date = datetime.strptime(completed_at, "%d/%m/%Y %H:%M")
+        if status == "Выполнено" and in_period(completed_at):
+            completed_count += 1
 
-                if completed_date.month == current_month and completed_date.year == current_year:
-                    completed_count += 1
-            except:
-                pass
-
-        elif status == "Отменено" and cancelled_at:
-            try:
-                cancelled_date = datetime.strptime(cancelled_at, "%d/%m/%Y %H:%M")
-
-                if cancelled_date.month == current_month and cancelled_date.year == current_year:
-                    cancelled_count += 1
-            except:
-                pass
+        elif status == "Отменено" and in_period(cancelled_at):
+            cancelled_count += 1
 
         elif status == "В процессе":
             active_tasks.append((employee_name, task_text, deadline))
@@ -387,7 +519,9 @@ async def admin_report(message: Message):
                 pass
 
     text = (
-        f"<b>📊 Отчет за текущий месяц</b>\n\n"
+        f"<b>📊 Отчет</b>\n\n"
+        f"📅 Период: <b>{period_title}</b>\n"
+        f"👤 Сотрудник: <b>{employee_title}</b>\n\n"
         f"✅ Выполнено: <b>{completed_count}</b>\n"
         f"❌ Отменено: <b>{cancelled_count}</b>\n"
         f"📌 Активных задач сейчас: <b>{len(active_tasks)}</b>\n"
@@ -406,22 +540,182 @@ async def admin_report(message: Message):
     else:
         text += "Невыполненных задач сейчас нет ✅"
 
-    admin_last_report[message.from_user.id] = text
+    return text
 
-    await message.answer(
-        text,
+
+def build_admin_report_excel(period: str, employee_filter: str = "all") -> str:
+    now = datetime.now()
+
+    if period == "month":
+        period_title = "Текущий месяц"
+    elif period == "year":
+        period_title = "Текущий год"
+    else:
+        period_title = "Все время"
+
+    if employee_filter == "all":
+        employee_title = "Все сотрудники"
+    else:
+        employee_title = get_employee_name(int(employee_filter))
+
+    def in_period(date_text):
+        if period == "all":
+            return True
+
+        if not date_text:
+            return False
+
+        try:
+            dt = datetime.strptime(date_text, "%d/%m/%Y %H:%M")
+        except:
+            return False
+
+        if period == "month":
+            return dt.month == now.month and dt.year == now.year
+
+        if period == "year":
+            return dt.year == now.year
+
+        return False
+
+    cursor.execute("""
+        SELECT employee_id, task, deadline, status, completed_at, cancelled_at
+        FROM tasks
+        ORDER BY id DESC
+    """)
+
+    tasks = cursor.fetchall()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Отчет"
+
+    ws.append(["Отчет"])
+    ws.append(["Период", period_title])
+    ws.append(["Сотрудник", employee_title])
+    ws.append([])
+
+    ws.append([
+        "Сотрудник",
+        "Задача",
+        "Дедлайн",
+        "Статус",
+        "Дата выполнения",
+        "Дата отмены"
+    ])
+
+    for employee_id, task_text, deadline, status, completed_at, cancelled_at in tasks:
+        if employee_filter != "all" and employee_id != int(employee_filter):
+            continue
+
+        if status == "Выполнено" and not in_period(completed_at):
+            continue
+
+        if status == "Отменено" and not in_period(cancelled_at):
+            continue
+
+        employee_name = get_employee_name(employee_id)
+
+        ws.append([
+            employee_name,
+            task_text,
+            deadline,
+            status,
+            completed_at or "",
+            cancelled_at or ""
+        ])
+
+    file_name = f"admin_report_{period}_{employee_filter}.xlsx"
+    file_path = file_name
+
+    wb.save(file_path)
+
+    return file_path
+
+@dp.callback_query(lambda callback: callback.data and callback.data.startswith("report_employee:"))
+async def admin_report_employee(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Отчет доступен только админу", show_alert=True)
+        return
+
+    _, period, employee_filter = callback.data.split(":")
+
+    report_text = build_admin_report(period, employee_filter)
+    excel_path = build_admin_report_excel(period, employee_filter)
+
+    admin_last_report[callback.from_user.id] = report_text
+    admin_last_report_excel[callback.from_user.id] = excel_path
+
+    await callback.message.answer(
+        report_text,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="📤 Отправить шефу",
+                        text="📤 Отправить текст шефу",
                         callback_data="send_report_to_boss"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📎 Скачать Excel",
+                        callback_data="download_report_excel"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📎 Отправить Excel шефу",
+                        callback_data="send_report_excel_to_boss"
                     )
                 ]
             ]
         )
     )
+
+    await callback.answer()
+
+@dp.callback_query(lambda callback: callback.data and callback.data.startswith("report_period:"))
+async def admin_report_period(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Отчет доступен только админу", show_alert=True)
+        return
+
+    period = callback.data.split(":")[1]
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                text="Все сотрудники",
+                callback_data=f"report_employee:{period}:all"
+            )
+        ]
+    ]
+
+    cursor.execute("""
+        SELECT telegram_id, display_name, name
+        FROM employees
+        ORDER BY display_name
+    """)
+
+    employees = cursor.fetchall()
+
+    for telegram_id, display_name, telegram_name in employees:
+        employee_name = display_name or telegram_name or "Без имени"
+
+        keyboard.append([
+            InlineKeyboardButton(
+                text=employee_name,
+                callback_data=f"report_employee:{period}:{telegram_id}"
+            )
+        ])
+
+    await callback.message.answer(
+        "Выбери сотрудника для отчета:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+
+    await callback.answer()
 
 @dp.callback_query(lambda callback: callback.data == "send_report_to_boss")
 async def send_report_to_boss(callback: CallbackQuery):
@@ -458,6 +752,74 @@ async def send_report_to_boss(callback: CallbackQuery):
         )
 
     await callback.answer()
+
+@dp.callback_query(lambda callback: callback.data == "download_report_excel")
+async def download_report_excel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Скачивать отчет может только админ", show_alert=True)
+        return
+
+    excel_path = admin_last_report_excel.get(callback.from_user.id)
+
+    if not excel_path:
+        await callback.message.answer(
+            "Сначала сформируй отчет через кнопку 📊 Отчет",
+            reply_markup=admin_menu
+        )
+        await callback.answer()
+        return
+
+    try:
+        await bot.send_document(
+            callback.from_user.id,
+            document=FSInputFile(excel_path),
+            caption="📎 Excel-отчет"
+        )
+    except Exception:
+        await callback.message.answer(
+            "Не смогла отправить Excel-файл. Попробуй сформировать отчет заново.",
+            reply_markup=admin_menu
+        )
+
+    await callback.answer()
+
+@dp.callback_query(lambda callback: callback.data == "send_report_excel_to_boss")
+async def send_report_excel_to_boss(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Отправлять Excel-отчет может только админ", show_alert=True)
+        return
+
+    excel_path = admin_last_report_excel.get(callback.from_user.id)
+
+    if not excel_path:
+        await callback.message.answer(
+            "Сначала сформируй отчет через кнопку 📊 Отчет",
+            reply_markup=admin_menu
+        )
+        await callback.answer()
+        return
+
+    try:
+        await bot.send_document(
+            BOSS_ID,
+            document=FSInputFile(excel_path),
+            caption="📎 Excel-отчет"
+        )
+
+        await callback.message.answer(
+            "Excel-отчет отправлен шефу ✅",
+            reply_markup=admin_menu
+        )
+
+    except Exception:
+        await callback.message.answer(
+            "Не смогла отправить Excel-отчет шефу. Проверь, что шеф открыл бота и нажал /start.",
+            reply_markup=admin_menu
+        )
+
+    await callback.answer()
+
+        
 @dp.message(lambda message: message.text and message.text == "📋 Список сотрудников")
 async def admin_employee_list(message: Message):
     if not is_admin(message.from_user.id):
