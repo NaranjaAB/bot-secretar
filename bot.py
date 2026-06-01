@@ -3322,7 +3322,7 @@ async def wrong_proof(message: Message):
         "Отправь документ или фото, либо нажми кнопку: Без файла"
     )
 
-@dp.message()
+@dp.message(StateFilter(None))
 async def unknown_message(message: Message):
     user_id = message.from_user.id
 
