@@ -150,7 +150,13 @@ def get_employee_name(user_id: int) -> str:
     return "Неизвестный сотрудник"
 
 
-conn = sqlite3.connect("tasks.db")
+DB_PATH = os.getenv("DB_PATH", "tasks.db")
+
+db_dir = os.path.dirname(DB_PATH)
+if db_dir:
+    os.makedirs(db_dir, exist_ok=True)
+
+conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
 cursor.execute("""
