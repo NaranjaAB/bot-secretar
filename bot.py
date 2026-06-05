@@ -41,15 +41,33 @@ class ChangeDeadlineForm(StatesGroup):
 
 class ManualReminderForm(StatesGroup):
     comment = State()
+
+class RecurringTaskForm(StatesGroup):
+    employee = State()
+    task = State()
+    repeat_type = State()
+    create_day = State()
+    deadline_type = State()
+    deadline_value = State()
     
 boss_menu = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="➕ Новая задача")],
+        [KeyboardButton(text="➕ Новая задача"), KeyboardButton(text="🔁 Повторяющиеся задачи")],
         [KeyboardButton(text="📋 Активные задачи"), KeyboardButton(text="👤 Сотрудник")],
         [KeyboardButton(text="📌 Мои задачи"), KeyboardButton(text="✔ Выполнено")],
         [KeyboardButton(text="🔁 Переназначить задачу"), KeyboardButton(text="📅 Дедлайн")],
         [KeyboardButton(text="❌ Отменить задачу"), KeyboardButton(text="📣 Напомнить")],
         [KeyboardButton(text="🗂 Архив")]
+    ],
+    resize_keyboard=True
+)
+
+recurring_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="➕ Создать повторяющуюся")],
+        [KeyboardButton(text="📋 Список повторяющихся")],
+        [KeyboardButton(text="⏸ Отключить повтор")],
+        [KeyboardButton(text="⬅️ Назад")]
     ],
     resize_keyboard=True
 )
@@ -167,6 +185,22 @@ CREATE TABLE IF NOT EXISTS tasks (
     deadline TEXT,
     status TEXT,
     reminded TEXT DEFAULT ''
+)
+""")
+
+conn.commit()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS recurring_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id INTEGER,
+    task TEXT,
+    repeat_type TEXT,
+    create_day TEXT,
+    deadline_type TEXT,
+    deadline_value TEXT,
+    is_active INTEGER DEFAULT 1,
+    last_created_at TEXT
 )
 """)
 
@@ -339,6 +373,477 @@ async def back_to_main_menu(message: Message):
             reply_markup=worker_menu
         )
 
+@dp.message(lambda message: message.text and message.text == "🔁 Повторяющиеся задачи")
+async def recurring_tasks_section(message: Message):
+    if not is_boss(message.from_user.id):
+        await message.answer("Повторяющиеся задачи доступны только шефу")
+        return
+
+    await message.answer(
+        "Раздел повторяющихся задач:",
+        reply_markup=recurring_menu
+    )
+
+
+@dp.message(lambda message: message.text and message.text == "➕ Создать повторяющуюся")
+async def create_recurring_start(message: Message, state: FSMContext):
+    if not is_boss(message.from_user.id):
+        await message.answer("Создавать повторяющиеся задачи может только шеф")
+        return
+
+    cursor.execute("""
+        SELECT telegram_id, display_name, name
+        FROM employees
+        WHERE is_active = 1
+        ORDER BY display_name
+    """)
+
+    employees = cursor.fetchall()
+
+    if not employees:
+        await message.answer(
+            "Пока нет активных сотрудников.\n"
+            "Попроси сотрудника открыть бота и нажать /start."
+        )
+        return
+
+    keyboard = []
+
+    for telegram_id, display_name, telegram_name in employees:
+        employee_name = display_name or telegram_name or "Без имени"
+
+        keyboard.append([
+            InlineKeyboardButton(
+                text=employee_name,
+                callback_data=f"recurring_employee:{telegram_id}"
+            )
+        ])
+
+    await state.set_state(RecurringTaskForm.employee)
+
+    await message.answer(
+        "Кому назначать повторяющуюся задачу?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+
+
+@dp.callback_query(lambda callback: callback.data and callback.data.startswith("recurring_employee:"))
+async def recurring_choose_employee(callback: CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+
+    if current_state != RecurringTaskForm.employee.state:
+        await callback.answer("Сейчас выбор сотрудника не ожидается", show_alert=True)
+        return
+
+    employee_id = int(callback.data.split(":")[1])
+    employee_name = get_employee_name(employee_id)
+
+    await state.update_data(employee_id=employee_id, employee_name=employee_name)
+    await state.set_state(RecurringTaskForm.task)
+
+    await callback.message.answer(
+        f"Выбран сотрудник: {employee_name}\n\n"
+        f"Напиши текст повторяющейся задачи.\n\n"
+        f"Например: Сделать отчет"
+    )
+
+    await callback.answer()
+
+
+@dp.message(RecurringTaskForm.task)
+async def recurring_get_task(message: Message, state: FSMContext):
+    if not message.text or len(message.text.strip()) < 2:
+        await message.answer("Напиши текст задачи.")
+        return
+
+    await state.update_data(task=message.text.strip())
+    await state.set_state(RecurringTaskForm.repeat_type)
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Каждую неделю", callback_data="recurring_type:weekly")],
+            [InlineKeyboardButton(text="Каждый месяц", callback_data="recurring_type:monthly")],
+            [InlineKeyboardButton(text="Каждый год", callback_data="recurring_type:yearly")]
+        ]
+    )
+
+    await message.answer(
+        "Как часто повторять задачу?",
+        reply_markup=keyboard
+    )
+
+
+@dp.callback_query(lambda callback: callback.data and callback.data.startswith("recurring_type:"))
+async def recurring_choose_type(callback: CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+
+    if current_state != RecurringTaskForm.repeat_type.state:
+        await callback.answer("Сейчас выбор повтора не ожидается", show_alert=True)
+        return
+
+    repeat_type = callback.data.split(":")[1]
+    await state.update_data(repeat_type=repeat_type)
+    await state.set_state(RecurringTaskForm.create_day)
+
+    if repeat_type == "weekly":
+        text = (
+            "В какой день недели создавать задачу?\n\n"
+            "Напиши, например: понедельник, вторник, пятница"
+        )
+    elif repeat_type == "monthly":
+        text = (
+            "В какой день месяца создавать задачу?\n\n"
+            "Напиши число от 1 до 31.\n"
+            "Например: 1"
+        )
+    else:
+        text = (
+            "В какую дату каждый год создавать задачу?\n\n"
+            "Напиши в формате ДД/ММ.\n"
+            "Например: 10/01"
+        )
+
+    await callback.message.answer(text)
+    await callback.answer()
+
+
+@dp.message(RecurringTaskForm.create_day)
+async def recurring_get_create_day(message: Message, state: FSMContext):
+    data = await state.get_data()
+    repeat_type = data["repeat_type"]
+    value = message.text.strip().lower()
+
+    week_days = {
+        "понедельник": "monday",
+        "вторник": "tuesday",
+        "среда": "wednesday",
+        "четверг": "thursday",
+        "пятница": "friday",
+        "суббота": "saturday",
+        "воскресенье": "sunday"
+    }
+
+    if repeat_type == "weekly":
+        if value not in week_days:
+            await message.answer("Напиши день недели: понедельник, вторник, среда и так далее.")
+            return
+
+        create_day = week_days[value]
+
+    elif repeat_type == "monthly":
+        if not value.isdigit() or not (1 <= int(value) <= 31):
+            await message.answer("Напиши число месяца от 1 до 31.")
+            return
+
+        create_day = value
+
+    else:
+        try:
+            datetime.strptime(value, "%d/%m")
+            create_day = value
+        except:
+            await message.answer("Напиши дату в формате ДД/ММ. Например: 10/01")
+            return
+
+    await state.update_data(create_day=create_day)
+    await state.set_state(RecurringTaskForm.deadline_type)
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="В день создания", callback_data="recurring_deadline:same_day")],
+            [InlineKeyboardButton(text="Через несколько дней", callback_data="recurring_deadline:after_days")],
+            [InlineKeyboardButton(text="Фиксированная дата", callback_data="recurring_deadline:fixed_day")]
+        ]
+    )
+
+    await message.answer(
+        "Какой дедлайн ставить для этой задачи?",
+        reply_markup=keyboard
+    )
+
+
+@dp.callback_query(lambda callback: callback.data and callback.data.startswith("recurring_deadline:"))
+async def recurring_choose_deadline_type(callback: CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+
+    if current_state != RecurringTaskForm.deadline_type.state:
+        await callback.answer("Сейчас выбор дедлайна не ожидается", show_alert=True)
+        return
+
+    deadline_type = callback.data.split(":")[1]
+    await state.update_data(deadline_type=deadline_type)
+
+    if deadline_type == "same_day":
+        await state.update_data(deadline_value="0")
+        await save_recurring_task(callback.message, state)
+        await callback.answer()
+        return
+
+    await state.set_state(RecurringTaskForm.deadline_value)
+
+    if deadline_type == "after_days":
+        await callback.message.answer(
+            "Через сколько дней после создания дедлайн?\n\n"
+            "Например: 3"
+        )
+    else:
+        await callback.message.answer(
+            "Напиши фиксированный дедлайн.\n\n"
+            "Для ежемесячной задачи — число месяца, например: 5\n"
+            "Для ежегодной задачи — дата ДД/ММ, например: 15/01"
+        )
+
+    await callback.answer()
+
+
+@dp.message(RecurringTaskForm.deadline_value)
+async def recurring_get_deadline_value(message: Message, state: FSMContext):
+    data = await state.get_data()
+    repeat_type = data["repeat_type"]
+    deadline_type = data["deadline_type"]
+    value = message.text.strip().lower()
+
+    if deadline_type == "after_days":
+        if not value.isdigit() or int(value) < 0:
+            await message.answer("Напиши число дней. Например: 3")
+            return
+
+    elif deadline_type == "fixed_day":
+        if repeat_type == "weekly":
+            await message.answer("Для еженедельной задачи лучше выбрать дедлайн 'в день создания' или 'через несколько дней'.")
+            return
+
+        if repeat_type == "monthly":
+            if not value.isdigit() or not (1 <= int(value) <= 31):
+                await message.answer("Для ежемесячной задачи напиши число месяца от 1 до 31.")
+                return
+
+        if repeat_type == "yearly":
+            try:
+                datetime.strptime(value, "%d/%m")
+            except:
+                await message.answer("Для ежегодной задачи напиши дату в формате ДД/ММ. Например: 15/01")
+                return
+
+    await state.update_data(deadline_value=value)
+    await save_recurring_task(message, state)
+
+
+async def save_recurring_task(message: Message, state: FSMContext):
+    data = await state.get_data()
+
+    cursor.execute(
+        """
+        INSERT INTO recurring_tasks (
+            employee_id,
+            task,
+            repeat_type,
+            create_day,
+            deadline_type,
+            deadline_value,
+            is_active,
+            last_created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 1, '')
+        """,
+        (
+            data["employee_id"],
+            data["task"],
+            data["repeat_type"],
+            data["create_day"],
+            data["deadline_type"],
+            data["deadline_value"]
+        )
+    )
+
+    conn.commit()
+
+    await message.answer(
+        (
+            f"Повторяющаяся задача создана ✅\n\n"
+            f"👤 Сотрудник: {data['employee_name']}\n"
+            f"📝 {data['task']}\n\n"
+            f"Теперь бот будет сам создавать эту задачу по расписанию."
+        ),
+        reply_markup=recurring_menu
+    )
+
+    await state.clear()
+
+def format_repeat_type(repeat_type):
+    if repeat_type == "weekly":
+        return "каждую неделю"
+    if repeat_type == "monthly":
+        return "каждый месяц"
+    if repeat_type == "yearly":
+        return "каждый год"
+    return repeat_type
+
+
+def format_create_day(repeat_type, create_day):
+    week_days_ru = {
+        "monday": "понедельник",
+        "tuesday": "вторник",
+        "wednesday": "среда",
+        "thursday": "четверг",
+        "friday": "пятница",
+        "saturday": "суббота",
+        "sunday": "воскресенье"
+    }
+
+    if repeat_type == "weekly":
+        return week_days_ru.get(create_day, create_day)
+
+    if repeat_type == "monthly":
+        return f"{create_day} числа"
+
+    if repeat_type == "yearly":
+        return create_day
+
+    return create_day
+
+
+def format_deadline(deadline_type, deadline_value):
+    if deadline_type == "same_day":
+        return "в день создания"
+
+    if deadline_type == "after_days":
+        return f"через {deadline_value} дн."
+
+    if deadline_type == "fixed_day":
+        return f"фиксированно: {deadline_value}"
+
+    return "не указан"
+
+
+@dp.message(lambda message: message.text and message.text == "📋 Список повторяющихся")
+async def recurring_list(message: Message):
+    if not is_boss(message.from_user.id):
+        await message.answer("Повторяющиеся задачи доступны только шефу")
+        return
+
+    cursor.execute("""
+        SELECT id, employee_id, task, repeat_type, create_day, deadline_type, deadline_value, is_active, last_created_at
+        FROM recurring_tasks
+        ORDER BY is_active DESC, id DESC
+    """)
+
+    rows = cursor.fetchall()
+
+    if not rows:
+        await message.answer(
+            "Повторяющихся задач пока нет.",
+            reply_markup=recurring_menu
+        )
+        return
+
+    text = "<b>🔁 Повторяющиеся задачи:</b>\n\n"
+
+    for recurring_id, employee_id, task_text, repeat_type, create_day, deadline_type, deadline_value, is_active, last_created_at in rows:
+        employee_name = get_employee_name(employee_id)
+        status = "активна" if is_active == 1 else "отключена"
+
+        text += (
+            f"<b>#{recurring_id}</b> — {status}\n"
+            f"👤 Сотрудник: {employee_name}\n"
+            f"📝 {task_text}\n"
+            f"🔁 Повтор: {format_repeat_type(repeat_type)}\n"
+            f"📅 Создавать: {format_create_day(repeat_type, create_day)}\n"
+            f"⏰ Дедлайн: {format_deadline(deadline_type, deadline_value)}\n\n"
+        )
+
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=recurring_menu
+    )
+
+
+@dp.message(lambda message: message.text and message.text == "⏸ Отключить повтор")
+async def recurring_disable_start(message: Message):
+    if not is_boss(message.from_user.id):
+        await message.answer("Отключать повтор может только шеф")
+        return
+
+    cursor.execute("""
+        SELECT id, employee_id, task
+        FROM recurring_tasks
+        WHERE is_active = 1
+        ORDER BY id DESC
+    """)
+
+    rows = cursor.fetchall()
+
+    if not rows:
+        await message.answer(
+            "Нет активных повторяющихся задач.",
+            reply_markup=recurring_menu
+        )
+        return
+
+    keyboard = []
+
+    for recurring_id, employee_id, task_text in rows:
+        employee_name = get_employee_name(employee_id)
+
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{task_text[:30]} | {employee_name}",
+                callback_data=f"disable_recurring:{recurring_id}"
+            )
+        ])
+
+    await message.answer(
+        "Выбери повторяющуюся задачу, которую нужно отключить:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+
+
+@dp.callback_query(lambda callback: callback.data and callback.data.startswith("disable_recurring:"))
+async def recurring_disable_confirm(callback: CallbackQuery):
+    if not is_boss(callback.from_user.id):
+        await callback.answer("Отключать повтор может только шеф", show_alert=True)
+        return
+
+    recurring_id = int(callback.data.split(":")[1])
+
+    cursor.execute("""
+        SELECT employee_id, task
+        FROM recurring_tasks
+        WHERE id = ? AND is_active = 1
+    """, (recurring_id,))
+
+    row = cursor.fetchone()
+
+    if not row:
+        await callback.answer("Повторяющаяся задача не найдена или уже отключена", show_alert=True)
+        return
+
+    employee_id, task_text = row
+    employee_name = get_employee_name(employee_id)
+
+    cursor.execute(
+        """
+        UPDATE recurring_tasks
+        SET is_active = 0
+        WHERE id = ?
+        """,
+        (recurring_id,)
+    )
+
+    conn.commit()
+
+    await callback.message.answer(
+        (
+            f"Повтор отключён ✅\n\n"
+            f"👤 Сотрудник: {employee_name}\n"
+            f"📝 {task_text}\n\n"
+            f"Уже созданные обычные задачи останутся как есть."
+        ),
+        reply_markup=recurring_menu
+    )
+
+    await callback.answer()
 @dp.message(lambda message: message.text and message.text == "📊 Отчет")
 async def admin_report(message: Message):
     if not is_admin(message.from_user.id):
@@ -458,14 +963,14 @@ async def admin_cancel_clear_archive(callback: CallbackQuery):
 def build_admin_report(period: str, employee_filter: str = "all") -> str:
     now = datetime.now()
     today = now.date()
-
+ 
     if period == "month":
         period_title = "текущий месяц"
     elif period == "year":
         period_title = "текущий год"
     else:
         period_title = "все время"
-
+ 
     if employee_filter == "all":
         employee_title = "все сотрудники"
     else:
@@ -1316,6 +1821,116 @@ async def admin_cancel_restore_employee(callback: CallbackQuery):
     )
 
     await callback.answer()
+
+def calculate_recurring_deadline(repeat_type, deadline_type, deadline_value, create_date):
+    if deadline_type == "same_day":
+        return create_date
+
+    if deadline_type == "after_days":
+        from datetime import timedelta
+        return create_date + timedelta(days=int(deadline_value))
+
+    if deadline_type == "fixed_day":
+        if repeat_type == "monthly":
+            year = create_date.year
+            month = create_date.month
+            day = int(deadline_value)
+
+            while True:
+                try:
+                    return datetime(year, month, day).date()
+                except ValueError:
+                    day -= 1
+
+        if repeat_type == "yearly":
+            day, month = map(int, deadline_value.split("/"))
+            return datetime(create_date.year, month, day).date()
+
+    return create_date
+
+
+async def create_due_recurring_tasks():
+    now = datetime.now()
+    today = now.date()
+
+    cursor.execute("""
+        SELECT id, employee_id, task, repeat_type, create_day, deadline_type, deadline_value, last_created_at
+        FROM recurring_tasks
+        WHERE is_active = 1
+    """)
+
+    rows = cursor.fetchall()
+
+    weekday_map = {
+        "monday": 0,
+        "tuesday": 1,
+        "wednesday": 2,
+        "thursday": 3,
+        "friday": 4,
+        "saturday": 5,
+        "sunday": 6
+    }
+
+    for recurring_id, employee_id, task_text, repeat_type, create_day, deadline_type, deadline_value, last_created_at in rows:
+        should_create = False
+
+        if last_created_at == today.strftime("%Y-%m-%d"):
+            continue
+
+        if repeat_type == "weekly":
+            should_create = today.weekday() == weekday_map.get(create_day)
+
+        elif repeat_type == "monthly":
+            target_day = int(create_day)
+            should_create = today.day == target_day
+
+        elif repeat_type == "yearly":
+            should_create = today.strftime("%d/%m") == create_day
+
+        if not should_create:
+            continue
+
+        deadline_date = calculate_recurring_deadline(
+            repeat_type,
+            deadline_type,
+            deadline_value,
+            today
+        )
+
+        deadline = deadline_date.strftime("%d/%m/%Y")
+
+        cursor.execute(
+            "INSERT INTO tasks (employee_id, task, deadline, status) VALUES (?, ?, ?, ?)",
+            (employee_id, task_text, deadline, "В процессе")
+        )
+
+        cursor.execute(
+            """
+            UPDATE recurring_tasks
+            SET last_created_at = ?
+            WHERE id = ?
+            """,
+            (today.strftime("%Y-%m-%d"), recurring_id)
+        )
+
+        conn.commit()
+
+        try:
+            await bot.send_message(
+                employee_id,
+                (
+                    f"<b>📌 Новая повторяющаяся задача</b>\n\n"
+                    f"📝 {task_text}\n"
+                    f"📅 Дедлайн: <b>{deadline}</b>"
+                ),
+                parse_mode="HTML"
+            )
+        except Exception:
+            await notify_admin_delivery_failed(
+                employee_id,
+                "Повторяющаяся задача",
+                task_text
+            )
 async def reminder():
     now = datetime.now()
     today = now.date()
@@ -2915,9 +3530,11 @@ async def choose_reassign_employee(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     
 async def main():
+    scheduler.add_job(create_due_recurring_tasks, "cron", hour=8, minute=0)
     scheduler.add_job(reminder, "cron", hour=9, minute=0)
     scheduler.add_job(reminder, "cron", hour=16, minute=0)
     scheduler.start()
+    
 
     await asyncio.gather(
         start_web_server(),
