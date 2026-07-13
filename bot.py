@@ -42,6 +42,9 @@ class ChangeDeadlineForm(StatesGroup):
 class ManualReminderForm(StatesGroup):
     comment = State()
 
+class ReportForm(StatesGroup):
+    proof = State()
+
 class RecurringTaskForm(StatesGroup):
     employee = State()
     task = State()
@@ -75,12 +78,11 @@ recurring_menu = ReplyKeyboardMarkup(
 worker_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📌 Мои задачи")],
-        [KeyboardButton(text="🗂 Мой архив")],
-        [KeyboardButton(text="✔ Выполнено")]
+        [KeyboardButton(text="📎 Отправить документ")],
+        [KeyboardButton(text="🗂 Мой архив")]
     ],
     resize_keyboard=True
 )
-
 admin_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="👥 Сотрудники")],
@@ -145,6 +147,12 @@ def save_employee(user_id: int, name: str) -> bool:
     return True
 
 def get_employee_name(user_id: int) -> str:
+    if user_id == BOSS_ID:
+        return "Шеф"
+
+    if user_id == ADMIN_ID:
+        return "Админ"
+
     cursor.execute(
         """
         SELECT display_name, name
@@ -247,6 +255,11 @@ def add_column_if_not_exists(column_name, column_sql):
 add_column_if_not_exists("proof_file_id", "proof_file_id TEXT")
 add_column_if_not_exists("proof_file_name", "proof_file_name TEXT")
 add_column_if_not_exists("completed_at", "completed_at TEXT")
+
+add_column_if_not_exists("report_file_id", "report_file_id TEXT")
+add_column_if_not_exists("report_file_name", "report_file_name TEXT")
+add_column_if_not_exists("report_submitted_at", "report_submitted_at TEXT")
+
 add_column_if_not_exists("overdue_notified", "overdue_notified INTEGER DEFAULT 0")
 add_column_if_not_exists("cancelled_at", "cancelled_at TEXT")
 
@@ -400,14 +413,14 @@ async def create_recurring_start(message: Message, state: FSMContext):
 
     employees = cursor.fetchall()
 
-    if not employees:
-        await message.answer(
-            "Пока нет активных сотрудников.\n"
-            "Попроси сотрудника открыть бота и нажать /start."
-        )
-        return
-
     keyboard = []
+
+    keyboard.append([
+        InlineKeyboardButton(
+            text="Шеф / себе",
+            callback_data=f"recurring_employee:{BOSS_ID}"
+        )
+    ])
 
     for telegram_id, display_name, telegram_name in employees:
         employee_name = display_name or telegram_name or "Без имени"
@@ -2548,6 +2561,195 @@ async def btn_my_tasks(message: Message):
 
     await message.answer(text, parse_mode="HTML")
 
+@dp.message(lambda message: message.text and message.text == "📎 Отправить отчет")
+async def send_report_start(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    if is_boss(user_id) or is_admin(user_id):
+        await message.answer(
+            "Эта кнопка для сотрудников. Шеф и админ отмечают выполнение через кнопку ✔ Выполнено."
+        )
+        return
+
+    cursor.execute("""
+        SELECT id, task, deadline
+        FROM tasks
+        WHERE employee_id = ? AND status = 'В процессе'
+        ORDER BY id DESC
+    """, (user_id,))
+
+    tasks = cursor.fetchall()
+
+    if not tasks:
+        await message.answer("У тебя пока нет активных задач для отчета.")
+        return
+
+    keyboard = []
+
+    for task_id, task_text, deadline in tasks:
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{task_text[:30]} | {deadline}",
+                callback_data=f"report_task:{task_id}"
+            )
+        ])
+
+    await message.answer(
+        "Выбери задачу, по которой хочешь отправить отчет:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+
+
+@dp.callback_query(lambda callback: callback.data and callback.data.startswith("report_task:"))
+async def choose_report_task(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+
+    if is_boss(user_id) or is_admin(user_id):
+        await callback.answer("Отчет отправляют сотрудники", show_alert=True)
+        return
+
+    task_id = int(callback.data.split(":")[1])
+
+    cursor.execute("""
+        SELECT task, deadline
+        FROM tasks
+        WHERE id = ? AND employee_id = ? AND status = 'В процессе'
+    """, (task_id, user_id))
+
+    task = cursor.fetchone()
+
+    if not task:
+        await callback.answer("Задача не найдена или уже не активна", show_alert=True)
+        return
+
+    task_text, deadline = task
+
+    await state.update_data(
+        report_task_id=task_id,
+        report_task_text=task_text,
+        report_deadline=deadline
+    )
+
+    await state.set_state(ReportForm.proof)
+
+    await callback.message.answer(
+        (
+            f"Отправь документ или фото по задаче:\n\n"
+            f"📝 {task_text}\n"
+            f"📅 Дедлайн: {deadline}\n\n"
+            f"Важно: задача не закроется автоматически. "
+            f"Шеф проверит отчет и сам отметит выполнение."
+        )
+    )
+
+    await callback.answer()
+
+
+@dp.message(ReportForm.proof, lambda message: message.document is not None or message.photo is not None)
+async def receive_report_file(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    employee_name = get_employee_name(user_id)
+
+    data = await state.get_data()
+
+    task_id = data["report_task_id"]
+    task_text = data["report_task_text"]
+    deadline = data["report_deadline"]
+
+    if message.document:
+        document = message.document
+        file_id = document.file_id
+        file_name = document.file_name or "Документ"
+        file_type = "document"
+    else:
+        photo = message.photo[-1]
+        file_id = photo.file_id
+        file_name = "Фото"
+        file_type = "photo"
+
+    submitted_at = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    cursor.execute(
+        """
+        UPDATE tasks
+        SET report_file_id = ?,
+            report_file_name = ?,
+            report_submitted_at = ?
+        WHERE id = ? AND employee_id = ? AND status = 'В процессе'
+        """,
+        (file_id, file_name, submitted_at, task_id, user_id)
+    )
+
+    conn.commit()
+
+    await message.answer(
+        (
+            f"Отчет отправлен шефу ✅\n\n"
+            f"📝 {task_text}\n"
+            f"📎 Файл: {file_name}\n\n"
+            f"Задача пока остается в процессе. "
+            f"Шеф отметит её выполненной после проверки."
+        ),
+        reply_markup=worker_menu
+    )
+
+    try:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Отметить выполненной",
+                        callback_data=f"done_task:{task_id}"
+                    )
+                ]
+            ]
+        )
+
+        await bot.send_message(
+            BOSS_ID,
+            (
+                f"<b>📎 Сотрудник отправил отчет</b>\n\n"
+                f"👤 Сотрудник: {employee_name}\n"
+                f"📝 Задача: {task_text}\n"
+                f"📅 Дедлайн: <b>{deadline}</b>\n"
+                f"📎 Файл: {file_name}\n"
+                f"🕒 Отправлено: {submitted_at}\n\n"
+                f"После проверки можно отметить задачу выполненной."
+            ),
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+
+        if file_type == "document":
+            await bot.send_document(
+                BOSS_ID,
+                document=file_id,
+                caption=f"📎 Отчет по задаче от {employee_name}"
+            )
+        else:
+            await bot.send_photo(
+                BOSS_ID,
+                photo=file_id,
+                caption=f"📎 Отчет по задаче от {employee_name}"
+            )
+
+    except Exception:
+        await notify_admin_delivery_failed(
+            BOSS_ID,
+            "Отправка отчета шефу",
+            task_text
+        )
+
+    await state.clear()
+
+
+@dp.message(ReportForm.proof)
+async def wrong_report_file(message: Message):
+    await message.answer(
+        "Отправь именно документ или фото.\n\n"
+        "Если передумал(а), напиши /cancel."
+    )
+
 @dp.message(lambda message: message.text and message.text == "🗂 Мой архив")
 async def my_archive(message: Message):
     user_id = message.from_user.id
@@ -3556,14 +3758,13 @@ async def btn_new(message: Message, state: FSMContext):
 
     employees = cursor.fetchall()
 
-    if not employees:
-        await message.answer(
-            "Пока нет активных сотрудников.\n"
-            "Попроси сотрудника открыть бота и нажать /start."
-        )
-        return
-
     keyboard = []
+    keyboard.append([
+        InlineKeyboardButton(
+            text="👑 Шеф / себе",
+            callback_data=f"choose_employee:{BOSS_ID}"
+        )
+    ])
 
     for telegram_id, display_name, telegram_name in employees:
         employee_name = display_name or telegram_name or "Без имени"
@@ -3591,6 +3792,19 @@ async def choose_employee(callback: CallbackQuery, state: FSMContext):
         return
 
     employee_id = int(callback.data.split(":")[1])
+    if employee_id == BOSS_ID:
+        employee_name = "Шеф"
+
+        await state.update_data(employee_id=employee_id, employee_name=employee_name)
+        await state.set_state(TaskForm.task)
+
+        await callback.message.answer(
+            f"Выбран исполнитель: {employee_name}\n\n"
+            f"Опиши задачу"
+        )
+
+        await callback.answer()
+        return
 
     cursor.execute(
         """
@@ -3682,27 +3896,32 @@ async def get_deadline(message: Message, state: FSMContext):
     await state.clear()
 
 
-@dp.message(lambda message: message.text and "Выполнено" in message.text)
+@dp.message(lambda message: message.text and message.text == "✔ Выполнено")
 async def btn_done(message: Message):
     user_id = message.from_user.id
 
+    if not (is_boss(user_id) or is_admin(user_id)):
+        await message.answer("Отмечать задачи выполненными может только шеф или админ.")
+        return
+
     cursor.execute("""
-        SELECT id, task, deadline
+        SELECT id, employee_id, task, deadline
         FROM tasks
-        WHERE employee_id = ? AND status = 'В процессе'
+        WHERE status = 'В процессе'
         ORDER BY id DESC
-    """, (user_id,))
+    """)
 
     tasks = cursor.fetchall()
 
     if not tasks:
-        await message.answer("У тебя нет активных задач 😄")
+        await message.answer("Нет активных задач для отметки выполнения")
         return
 
     keyboard = []
 
-    for task_id, task_text, deadline in tasks:
-        button_text = f"{task_text[:30]}"
+    for task_id, employee_id, task_text, deadline in tasks:
+        employee_name = get_employee_name(employee_id)
+        button_text = f"{task_text[:25]} | {employee_name}"
 
         if deadline:
             button_text += f" | {deadline}"
@@ -3715,21 +3934,25 @@ async def btn_done(message: Message):
         ])
 
     await message.answer(
-        "Выбери задачу, которую хочешь отметить выполненной:",
+        "Выбери задачу, которую нужно отметить выполненной:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
     )
 
-
 @dp.callback_query(lambda callback: callback.data and callback.data.startswith("done_task:"))
 async def choose_done_task(callback: CallbackQuery, state: FSMContext):
-    task_id = int(callback.data.split(":")[1])
     user_id = callback.from_user.id
+
+    if not (is_boss(user_id) or is_admin(user_id)):
+        await callback.answer("Отмечать задачи выполненными может только шеф или админ", show_alert=True)
+        return
+
+    task_id = int(callback.data.split(":")[1])
 
     cursor.execute("""
         SELECT id, task, deadline, status, employee_id
         FROM tasks
-        WHERE id = ? AND employee_id = ? AND status = 'В процессе'
-    """, (task_id, user_id))
+        WHERE id = ? AND status = 'В процессе'
+    """, (task_id,))
 
     task = cursor.fetchone()
 
@@ -3767,15 +3990,21 @@ async def done_without_file_button(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Сейчас выполнение задачи не ожидается", show_alert=True)
         return
 
+    user_id = callback.from_user.id
+
+    if not (is_boss(user_id) or is_admin(user_id)):
+        await callback.answer("Отмечать задачи выполненными может только шеф или админ", show_alert=True)
+        await state.clear()
+        return
+
     data = await state.get_data()
     task_id = data["task_id"]
-    user_id = callback.from_user.id
 
     cursor.execute("""
         SELECT task, deadline, employee_id
         FROM tasks
-        WHERE id = ? AND employee_id = ? AND status = 'В процессе'
-    """, (task_id, user_id))
+        WHERE id = ? AND status = 'В процессе'
+    """, (task_id,))
 
     task = cursor.fetchone()
 
@@ -3793,48 +4022,58 @@ async def done_without_file_button(callback: CallbackQuery, state: FSMContext):
         """
         UPDATE tasks
         SET status = ?, completed_at = ?
-        WHERE id = ? AND employee_id = ?
+        WHERE id = ?
         """,
-        ("Выполнено", completed_at, task_id, user_id)
+        ("Выполнено", completed_at, task_id)
     )
 
     conn.commit()
 
     await callback.message.answer("Задача отмечена как выполненная ✅")
 
-    await bot.send_message(
-        BOSS_ID,
-        (
-            f"<b>✅ Задача выполнена</b>\n\n"
-            f"👤 Сотрудник: {employee_name}\n"
-            f"📝 {task_text}\n"
-            f"📅 Дедлайн: <b>{deadline}</b>\n"
-            f"📌 Без прикреплённого файла"
-        ),
-        parse_mode="HTML"
-    )
+    if employee_id != user_id:
+        try:
+            await bot.send_message(
+                employee_id,
+                (
+                    f"<b>✅ Задача отмечена выполненной</b>\n\n"
+                    f"📝 {task_text}\n"
+                    f"📅 Дедлайн: <b>{deadline}</b>"
+                ),
+                parse_mode="HTML"
+            )
+        except Exception:
+            await notify_admin_delivery_failed(
+                employee_id,
+                "Отметка выполнения",
+                task_text
+            )
 
     await state.clear()
     await callback.answer()
 
-
-
 @dp.message(DoneForm.proof, lambda message: message.text and message.text.lower() == "без файла")
 async def done_without_file(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    if not (is_boss(user_id) or is_admin(user_id)):
+        await message.answer("Отмечать задачи выполненными может только шеф или админ.")
+        await state.clear()
+        return
+
     data = await state.get_data()
     task_id = data["task_id"]
-    user_id = message.from_user.id
 
     cursor.execute("""
         SELECT task, deadline, employee_id
         FROM tasks
-        WHERE id = ? AND employee_id = ?
-    """, (task_id, user_id))
+        WHERE id = ? AND status = 'В процессе'
+    """, (task_id,))
 
     task = cursor.fetchone()
 
     if not task:
-        await message.answer("Задача не найдена")
+        await message.answer("Задача не найдена или уже не активна")
         await state.clear()
         return
 
@@ -3846,34 +4085,47 @@ async def done_without_file(message: Message, state: FSMContext):
         """
         UPDATE tasks
         SET status = ?, completed_at = ?
-        WHERE id = ? AND employee_id = ?
+        WHERE id = ?
         """,
-        ("Выполнено", completed_at, task_id, user_id)
+        ("Выполнено", completed_at, task_id)
     )
 
     conn.commit()
 
     await message.answer("Задача отмечена как выполненная ✅")
 
-    await bot.send_message(
-        BOSS_ID,
-        (
-            f"<b>✅ Задача выполнена</b>\n\n"
-            f"👤 Сотрудник: {employee_name}\n"
-            f"📝 {task_text}\n"
-            f"📅 Дедлайн: <b>{deadline}</b>\n"
-            f"📌 Без прикреплённого файла"
-        ),
-        parse_mode="HTML"
-    )
+    if employee_id != user_id:
+        try:
+            await bot.send_message(
+                employee_id,
+                (
+                    f"<b>✅ Задача отмечена выполненной</b>\n\n"
+                    f"📝 {task_text}\n"
+                    f"📅 Дедлайн: <b>{deadline}</b>"
+                ),
+                parse_mode="HTML"
+            )
+        except Exception:
+            await notify_admin_delivery_failed(
+                employee_id,
+                "Отметка выполнения",
+                task_text
+            )
+
     await state.clear()
 
 
 @dp.message(DoneForm.proof, lambda message: message.document is not None or message.photo is not None)
 async def done_with_file(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    if not (is_boss(user_id) or is_admin(user_id)):
+        await message.answer("Отмечать задачи выполненными может только шеф или админ.")
+        await state.clear()
+        return
+
     data = await state.get_data()
     task_id = data["task_id"]
-    user_id = message.from_user.id
 
     if message.document:
         document = message.document
@@ -3889,13 +4141,13 @@ async def done_with_file(message: Message, state: FSMContext):
     cursor.execute("""
         SELECT task, deadline, employee_id
         FROM tasks
-        WHERE id = ? AND employee_id = ?
-    """, (task_id, user_id))
+        WHERE id = ? AND status = 'В процессе'
+    """, (task_id,))
 
     task = cursor.fetchone()
 
     if not task:
-        await message.answer("Задача не найдена")
+        await message.answer("Задача не найдена или уже не активна")
         await state.clear()
         return
 
@@ -3907,43 +4159,49 @@ async def done_with_file(message: Message, state: FSMContext):
         """
         UPDATE tasks
         SET status = ?, proof_file_id = ?, proof_file_name = ?, completed_at = ?
-        WHERE id = ? AND employee_id = ?
+        WHERE id = ?
         """,
-        ("Выполнено", file_id, file_name, completed_at, task_id, user_id)
+        ("Выполнено", file_id, file_name, completed_at, task_id)
     )
 
     conn.commit()
 
     await message.answer("Задача выполнена, файл прикреплён ✅")
 
-    await bot.send_message(
-        BOSS_ID,
-        (
-            f"<b>✅ Задача выполнена с файлом</b>\n\n"
-            f"👤 Сотрудник: {employee_name}\n"
-            f"📝 {task_text}\n"
-            f"📅 Дедлайн: <b>{deadline}</b>\n"
-            f"📎 Файл: {file_name}"
-        ),
-        parse_mode="HTML"
-    )
+    if employee_id != user_id:
+        try:
+            await bot.send_message(
+                employee_id,
+                (
+                    f"<b>✅ Задача отмечена выполненной</b>\n\n"
+                    f"📝 {task_text}\n"
+                    f"📅 Дедлайн: <b>{deadline}</b>\n"
+                    f"📎 Файл прикреплён: {file_name}"
+                ),
+                parse_mode="HTML"
+            )
 
-    if file_type == "document":
-        await bot.send_document(
-            BOSS_ID,
-            document=file_id,
-            caption=f"📎 Файл по задаче от сотрудника {employee_name}"
-        )
-    else:
-        await bot.send_photo(
-            BOSS_ID,
-            photo=file_id,
-            caption=f"📎 Фото по задаче от сотрудника {employee_name}"
-        )
+            if file_type == "document":
+                await bot.send_document(
+                    employee_id,
+                    document=file_id,
+                    caption=f"📎 Файл по выполненной задаче"
+                )
+            else:
+                await bot.send_photo(
+                    employee_id,
+                    photo=file_id,
+                    caption=f"📎 Фото по выполненной задаче"
+                )
+
+        except Exception:
+            await notify_admin_delivery_failed(
+                employee_id,
+                "Отметка выполнения с файлом",
+                task_text
+            )
 
     await state.clear()
-
-
 @dp.message(DoneForm.proof)
 async def wrong_proof(message: Message):
     await message.answer(
