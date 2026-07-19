@@ -2104,15 +2104,17 @@ async def reminder():
                     should_send_boss = True
 
             if should_send_boss:
+                overdue_text = (
+                    f"<b>⚠️ Просрочен дедлайн</b>\n\n"
+                    f"👤 Исполнитель: {employee_name}\n"
+                    f"📝 Задача: {task_text}\n"
+                    f"📅 Дедлайн был: <b>{deadline_text}</b>"
+                )
+
                 try:
                     await bot.send_message(
                         BOSS_ID,
-                        (
-                            f"<b>⚠️ Сотрудник просрочил дедлайн</b>\n\n"
-                            f"👤 Сотрудник: {employee_name}\n"
-                            f"📝 Задача: {task_text}\n"
-                            f"📅 Дедлайн был: <b>{deadline_text}</b>"
-                        ),
+                        overdue_text,
                         parse_mode="HTML"
                     )
                 except Exception:
@@ -2122,12 +2124,22 @@ async def reminder():
                                 ADMIN_ID,
                                 (
                                     f"⚠️ Не удалось отправить уведомление шефу о просрочке\n\n"
-                                    f"👤 Сотрудник: {employee_name}\n"
+                                    f"👤 Исполнитель: {employee_name}\n"
                                     f"📝 Задача: {task_text}"
                                 )
                             )
                         except Exception:
                             pass
+
+                if ADMIN_ID and ADMIN_ID != BOSS_ID:
+                    try:
+                        await bot.send_message(
+                            ADMIN_ID,
+                            overdue_text,
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
 
                 cursor.execute(
                     """
@@ -3733,10 +3745,12 @@ async def choose_reassign_employee(callback: CallbackQuery, state: FSMContext):
     
 async def main():
     scheduler.add_job(create_due_recurring_tasks, "cron", hour=8, minute=0)
-    scheduler.add_job(reminder, "cron", hour=9, minute=0)
-    scheduler.add_job(reminder, "cron", hour=16, minute=0)
+
+    scheduler.add_job(reminder, "interval", minutes=1)
+    # scheduler.add_job(reminder, "cron", hour=9, minute=0)
+    # scheduler.add_job(reminder, "cron", hour=16, minute=0)
+
     scheduler.start()
-    
 
     await asyncio.gather(
         start_web_server(),
