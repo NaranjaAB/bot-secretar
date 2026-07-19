@@ -4,7 +4,8 @@ from aiogram.filters import CommandStart, Command, StateFilter
 import asyncio
 import sqlite3
 from apscheduler.schedulers.asyncio import AsyncIOScheduler 
-from datetime import datetime 
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import dateparser
 from openpyxl import Workbook
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -223,6 +224,34 @@ CREATE TABLE IF NOT EXISTS employees (
 """)
 
 conn.commit()
+
+def parse_deadline(text: str):
+    value = text.strip().lower()
+    today = datetime.now(ZoneInfo("Asia/Almaty")).date()
+
+    if value in ["сегодня", "на сегодня"]:
+        return today
+
+    if value in ["завтра", "на завтра"]:
+        return today + timedelta(days=1)
+
+    if value in ["послезавтра", "на послезавтра"]:
+        return today + timedelta(days=2)
+
+    parsed = dateparser.parse(
+        value,
+        languages=["ru"],
+        settings={
+            "PREFER_DATES_FROM": "future",
+            "RELATIVE_BASE": datetime.now(ZoneInfo("Asia/Almaty")),
+            "DATE_ORDER": "DMY"
+        }
+    )
+
+    if not parsed:
+        return None
+
+    return parsed.date()
 
 async def notify_admin_delivery_failed(employee_id: int, action: str, task_text: str):
     if not ADMIN_ID:
@@ -3423,15 +3452,11 @@ async def get_new_deadline(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    deadline_date = dateparser.parse(
-        message.text,
-        languages=["ru"],
-        settings={"PREFER_DATES_FROM": "future"}
-    )
+    deadline_date = parse_deadline(message.text)
 
     if not deadline_date:
         await message.answer(
-            "Не смогла понять дату. Напиши, например: 30/06/2026 или завтра"
+            "Не смог понять дату. Напиши, например: 30/06/2026 или завтра"
         )
         return
 
@@ -3746,9 +3771,8 @@ async def choose_reassign_employee(callback: CallbackQuery, state: FSMContext):
 async def main():
     scheduler.add_job(create_due_recurring_tasks, "cron", hour=8, minute=0)
 
-    scheduler.add_job(reminder, "interval", minutes=1)
-    # scheduler.add_job(reminder, "cron", hour=9, minute=0)
-    # scheduler.add_job(reminder, "cron", hour=16, minute=0)
+    scheduler.add_job(reminder, "cron", hour=9, minute=0)
+    scheduler.add_job(reminder, "cron", hour=16, minute=0)
 
     scheduler.start()
 
@@ -3861,11 +3885,7 @@ async def get_deadline(message: Message, state: FSMContext):
     employee_name = data.get("employee_name", str(employee_id))
     task_text = data["task"]
 
-    deadline_date = dateparser.parse(
-        message.text,
-        languages=["ru"],
-        settings={"PREFER_DATES_FROM": "future"}
-    )
+    deadline_date = parse_deadline(message.text)
 
     if deadline_date:
         deadline = deadline_date.strftime("%d/%m/%Y")
