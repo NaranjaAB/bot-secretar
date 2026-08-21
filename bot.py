@@ -98,7 +98,6 @@ admin_menu = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
-
 admin_employees_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📋 Список сотрудников")],
