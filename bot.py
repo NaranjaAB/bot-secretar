@@ -2726,8 +2726,8 @@ async def get_report_comment(message: Message, state: FSMContext):
 async def choose_report_attach(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
 
-    if is_boss(user_id) or is_admin(user_id):
-        await callback.answer("Это действие для сотрудников", show_alert=True)
+    if is_boss(user_id):
+        await callback.answer("Это действие недоступно шефу", show_alert=True)
         return
 
     choice = callback.data.split(":")[1]
