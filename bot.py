@@ -93,6 +93,7 @@ admin_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="📊 Отчет")],
         [KeyboardButton(text="🧹 Очистить архив")],
         [KeyboardButton(text="📌 Мои задачи"), KeyboardButton(text="🗂 Мой архив")],
+        [KeyboardButton(text="✉️ Написать шефу")],
         [KeyboardButton(text="✔ Выполнено")]
     ],
     resize_keyboard=True
@@ -2610,9 +2611,9 @@ async def btn_my_tasks(message: Message):
 async def send_report_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
-    if is_boss(user_id) or is_admin(user_id):
+    if is_boss(user_id):
         await message.answer(
-            "Эта кнопка для сотрудников. Шеф и админ отмечают выполнение через кнопку ✔ Выполнено."
+            "Эта кнопка доступна сотрудникам и админу."
         )
         return
 
@@ -2649,8 +2650,8 @@ async def send_report_start(message: Message, state: FSMContext):
 async def choose_report_task(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
 
-    if is_boss(user_id) or is_admin(user_id):
-        await callback.answer("Писать шефу по задаче могут сотрудники", show_alert=True)
+    if is_boss(user_id):
+        await callback.answer("Шеф не может писать сам себе", show_alert=True)
         return
 
     task_id = int(callback.data.split(":")[1])
