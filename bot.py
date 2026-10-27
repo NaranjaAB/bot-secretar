@@ -2164,16 +2164,6 @@ async def reminder():
                         except Exception:
                             pass
 
-                if ADMIN_ID and ADMIN_ID != BOSS_ID:
-                    try:
-                        await bot.send_message(
-                            ADMIN_ID,
-                            overdue_text,
-                            parse_mode="HTML"
-                        )
-                    except Exception:
-                        pass
-
                 cursor.execute(
                     """
                     UPDATE tasks
